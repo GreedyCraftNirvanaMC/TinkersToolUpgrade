@@ -1,6 +1,7 @@
 package com.gctn.tinkerstoolupgrade;
 
 import com.gctn.tconstruct.tools.ToolDefinition;
+import com.gctn.tconstruct.tools.ToolRanged;
 import com.gctn.tconstruct.tools.tools.AntiqueTool;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -8,17 +9,20 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageTypes;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.common.ItemAbilities;
+import net.neoforged.neoforge.common.damagesource.DamageContainer;
 import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingShieldBlockEvent;
 import net.neoforged.neoforge.event.entity.ProjectileImpactEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
@@ -77,23 +81,28 @@ public final class GameplayEvents {
         }
     }
 
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void prepareLauncher(PlayerInteractEvent.RightClickItem event) {
+        // 新得到的装备可能在第一次背包 tick 前就被使用；确保发射快照也含有身份。
+        if (event.getEntity() instanceof ServerPlayer player && eligible(player, event.getItemStack())) {
+            Progression.ensureIdentity(event.getItemStack());
+        }
+    }
+
     @SubscribeEvent
     public static void damage(LivingDamageEvent.Post event) {
-        if (event.getEntity().level().isClientSide || !Float.isFinite(event.getNewDamage()) || event.getNewDamage() <= 0) { return; }
+        if (event.getEntity().level().isClientSide || !Float.isFinite(event.getNewDamage())) { return; }
+        if (event.getSource().getEntity() instanceof ServerPlayer player
+                && event.getSource().getDirectEntity() instanceof AbstractArrow projectile
+                && (event.getNewDamage() > 0 || event.getReduction(DamageContainer.Reduction.ABSORPTION) > 0)) {
+            projectileDamage(event, player, projectile);
+        }
+        if (event.getNewDamage() <= 0) { return; }
         if (event.getSource().getEntity() instanceof ServerPlayer player
                 && event.getSource().getDirectEntity() == player && event.getSource().is(DamageTypes.PLAYER_ATTACK)) {
             ItemStack tool = player.getMainHandItem();
             if (eligible(player, tool)) {
-                UUID id = Progression.ensureIdentity(tool);
-                CompoundTag root = event.getEntity().getPersistentData().getCompound(DAMAGE_DATA);
-                String key = player.getUUID() + "/" + id;
-                CompoundTag contribution = root.getCompound(key);
-                contribution.putUUID("Player", player.getUUID());
-                contribution.putUUID("Tool", id);
-                contribution.putDouble("Damage", Math.min(Integer.MAX_VALUE,
-                        Math.max(0, contribution.getDouble("Damage")) + event.getNewDamage()));
-                root.put(key, contribution);
-                event.getEntity().getPersistentData().put(DAMAGE_DATA, root);
+                recordDamage(event, player, tool);
             }
         }
         if (event.getEntity() instanceof ServerPlayer wearer && !wearer.isCreative() && !wearer.isSpectator()) {
@@ -102,6 +111,45 @@ public final class GameplayEvents {
                 if (Progression.isArmor(armor)) { Progression.addXp(armor, xp, wearer); }
             }
         }
+    }
+
+    private static void recordDamage(LivingDamageEvent.Post event, ServerPlayer player, ItemStack tool) {
+        UUID id = Progression.ensureIdentity(tool);
+        CompoundTag root = event.getEntity().getPersistentData().getCompound(DAMAGE_DATA);
+        String key = player.getUUID() + "/" + id;
+        CompoundTag contribution = root.getCompound(key);
+        contribution.putUUID("Player", player.getUUID());
+        contribution.putUUID("Tool", id);
+        contribution.putDouble("Damage", Math.min(Integer.MAX_VALUE,
+                Math.max(0, contribution.getDouble("Damage")) + event.getNewDamage()));
+        root.put(key, contribution);
+        event.getEntity().getPersistentData().put(DAMAGE_DATA, root);
+    }
+
+    private static void projectileDamage(LivingDamageEvent.Post event, ServerPlayer player, AbstractArrow projectile) {
+        ItemStack launcherSnapshot = ToolRanged.launcherFor(projectile);
+        ItemStack launcher = actualTool(player, launcherSnapshot);
+        if (eligible(player, launcher) && launcherSnapshot.getItem() instanceof AntiqueTool item && item.isLauncher()
+                && projectile.getDeltaMovement().lengthSqr() > .4 * .4) {
+            // 与旧版相同：每秒完整蓄力时间奖励 5 XP，向上取整。必须读取发射时的
+            // 属性；玩家切换手持、替换部件或升级后均不能改变已发射箭的奖励。
+            int drawTicks = ToolRanged.drawTime(item, launcherSnapshot);
+            Progression.addXp(launcher, (drawTicks + 3L) / 4, player);
+        }
+        ItemStack ammoSnapshot = ToolRanged.traitsFor(projectile);
+        if (ammoSnapshot.getItem() instanceof AntiqueTool ammo && ammo.isAmmo()) {
+            ItemStack actualAmmo = actualTool(player, ammoSnapshot);
+            if (event.getNewDamage() > 0 && eligible(player, actualAmmo)) { recordDamage(event, player, actualAmmo); }
+        }
+    }
+
+    private static ItemStack actualTool(ServerPlayer player, ItemStack snapshot) {
+        if (!Progression.supported(snapshot)) { return ItemStack.EMPTY; }
+        UUID id = Progression.identity(snapshot);
+        if (id == null) { return ItemStack.EMPTY; }
+        ItemStack actual = findTool(player, id);
+        // 旧投射物无来源或身份、装备已移出背包、复制 ID 有歧义时均不猜测目标。
+        return actual.getItem() == snapshot.getItem() ? actual : ItemStack.EMPTY;
     }
 
     @SubscribeEvent(priority = EventPriority.LOWEST)

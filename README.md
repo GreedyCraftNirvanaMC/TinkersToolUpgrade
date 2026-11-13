@@ -6,7 +6,7 @@ A Minecraft **1.21.1 / NeoForge** port of boni's MIT-licensed **Tinkers Tool Lev
 
 Use Java 21 and NeoForge 21.1.265 or newer. Install this mod on both the client and server, together with:
 
-- **TinkersNirvana 1.21.1-1.0.3+** (`tconstruct`), required.
+- **TinkersNirvana 1.21.1-1.0.3+** (`tconstruct`), required. Use a build containing `ToolRanged.launcherFor`; earlier builds with the same version number do not supply that API.
 - **TinkersArmoryNirvana 1.21.1-1.0.4+** (`conarm`), optional.
 
 Neither dependency is bundled. Importing Forge 1.12.2 worlds/item NBT is not supported.
@@ -24,9 +24,9 @@ Neither dependency is bundled. Importing Forge 1.12.2 worlds/item NBT is not sup
 
 Creative/spectator gameplay and broken equipment do not earn XP. One grant can award multiple upgrades. A configured level cap is exact; lowering it never revokes existing slots. Integer overflow is prevented. Rejected upgrades do not consume their XP cost.
 
-Initial modifier slots are configured by TinkersNirvana itself. This addon only supplies upgrade rewards.
+Initial modifier slots are configured by TinkersNirvana itself (`tools.initialModifierSlots`). This addon only supplies upgrade rewards.
 
-**Ranged launcher integration awaits the dependency's projectile-source API.** Special arrows/bolts expose merged trait snapshots, which cannot safely identify the actual launcher. Integration will use the new API rather than guess from the currently held item.
+Bow/crossbow hits faster than 0.4 blocks/tick grant the actual launcher 5 XP per second of its saved full draw time, rounded up. Ordinary arrows, Tinkers arrows/bolts and split projectiles use `ToolRanged.launcherFor`, including after switching the held item or saving/loading the projectile. Tinkers ammo and thrown shurikens separately accumulate actual damage for death-time settlement. Missing source/identity records, ambiguous copied identities and equipment no longer in the shooter's inventory are rejected. No XP is written into projectile snapshots.
 
 ## Configuration
 
@@ -58,6 +58,10 @@ Build both dependency projects first using Java 21. Put the checkouts alongside 
 ```
 
 Default paths are in `build.gradle`. Both JARs are required to compile the optional integration. `-PwithoutArmory` omits armory from development runtime while retaining compile-time API access. `runClient` and `runServer` use the same properties. Output is in `build/libs/`; dependencies, game files and local paths are not committed.
+
+## Verification
+
+`build` runs 10 overflow/rounding boundary checks. For targeted server logic verification, run `runServer -PverifyRanged` with the same dependency paths. The fixture uses a separate `run-ranged-checks` directory, checks native damage events with a fake player and shuts the server down automatically. Use a local `server.properties` with `server-ip=127.0.0.1` and an unused port. Verification sources are excluded from normal builds and release JARs. These checks do not verify client input, visuals or audio.
 
 ## Credits and license
 
